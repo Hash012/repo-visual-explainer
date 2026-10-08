@@ -2,13 +2,14 @@
 (() => {
   const $ = id => document.getElementById(id);
   const NS = 'http://www.w3.org/2000/svg';
-  const statusLabels = {verified:'已验证', inferred:'推断', planned:'规划', blocked:'阻塞'};
+  const statusLabels = {verified:'已核对', inferred:'推断', planned:'规划', blocked:'阻塞'};
   const statusColors = {verified:'#258676', inferred:'#537db6', planned:'#b48632', blocked:'#ba6155'};
   const kindLabels = {'public-interface':'公开接口','mutable-state':'可变状态',artifact:'产物',execution:'执行',ownership:'归属',data:'数据',call:'调用',invalidation:'失效'};
   const palette = ['#6397a9','#8d85b7','#75a293','#ba9970','#7993bd','#b9859d'];
   let atlas = null, view = null, selected = new Set(), box = null, baseBox = null;
   let busy = false, serverBusy = false, localBusy = false, polling = false, changed = new Set(), dragging = null, activeJob = null;
-  let storedJob = null, sourceRequest = 0;
+  let storedJob = null, sourceRequest = 0, proposal = null, freshness = {}, coverage = '', explicitScope = false;
+  const graphAtlas = () => proposal?.candidate || atlas;
   try { storedJob = JSON.parse(sessionStorage.getItem('atlas-job') || 'null'); } catch (_) {}
   const svg = $('graph');
   const measurement = document.createElement('canvas').getContext('2d');
@@ -47,8 +48,13 @@
   }
   function setBusy(value, label) {
     busy = Boolean(value) || localBusy;
-    $('submit').disabled = busy || !atlas;
-    $('undo').disabled = busy || !atlas || atlas.revision === 0;
+    $('submit').disabled = busy || !atlas || Boolean(proposal);
+    $('undo').disabled = busy || !atlas || atlas.revision === 0 || Boolean(proposal);
+    $('source-check').disabled = busy || !atlas;
+    $('source-refresh').disabled = busy || !atlas || Boolean(proposal) || !refreshViews().length;
+    $('preview-accept').disabled = busy; $('preview-discard').disabled = busy;
+    $('export-svg').disabled = !atlas || Boolean(proposal);
+    $('export-svg').title = proposal ? '候选预览须先接受修改，再导出正式图谱 SVG。' : '导出当前正式图谱 SVG。';
     $('modes').disabled = busy;
     $('job-status').textContent = label || (busy ? '任务执行中 · 可以继续浏览' : '就绪');
     // Drafts and browsing remain available; each request uses a frozen snapshot.
@@ -66,20 +72,22 @@
   function elements() { return [...view.nodes, ...view.edges]; }
   function navigate(viewId, ids = [], push = true, focus = true) {
     if (!atlas) return;
-    const target = atlas.views.find(v => v.id === viewId) || atlas.views[0];
+    const target = graphAtlas().views.find(v => v.id === viewId) || graphAtlas().views[0];
     const switching = !view || view.id !== target.id;
     view = target;
+    if(switching)explicitScope=false;
     const valid = new Set(elements().map(e => e.id));
     selected = new Set(ids.filter(id => valid.has(id)));
     renderGraph(switching);
     renderViews();
     renderInspector();
+    renderFreshness();
     if (focus && selected.size) focusSelection();
     if (push) writeHash();
   }
   function renderViews() {
     $('views').replaceChildren();
-    atlas.views.forEach((v, index) => {
+    graphAtlas().views.forEach((v, index) => {
       const button = el('button','view-button' + (v.id === view.id ? ' active' : ''), v.title);
       button.type = 'button';
       button.setAttribute('aria-current', v.id === view.id ? 'page' : 'false');
@@ -93,29 +101,7 @@
     for (const c of kind) hash = ((hash << 5) - hash + c.charCodeAt(0)) | 0;
     return palette[(hash >>> 0) % palette.length];
   }
-  function borderPoint(node, toward) {
-    const center = {x:node.x + node.width / 2, y:node.y + node.height / 2};
-    const dx = toward.x - center.x, dy = toward.y - center.y;
-    const scale = Math.max(Math.abs(dx) / (node.width / 2), Math.abs(dy) / (node.height / 2));
-    return scale ? {x:center.x + dx / scale, y:center.y + dy / scale} : center;
-  }
-  function route(edge) {
-    const a = view.nodes.find(n => n.id === edge.source), b = view.nodes.find(n => n.id === edge.target);
-    if (!a || !b) return [];
-    const ac = {x:a.x+a.width/2,y:a.y+a.height/2}, bc = {x:b.x+b.width/2,y:b.y+b.height/2};
-    if (edge.points.length) return [borderPoint(a,edge.points[0]), ...edge.points, borderPoint(b,edge.points.at(-1))];
-    if (a.id === b.id) return [{x:a.x+a.width,y:ac.y},{x:a.x+a.width+22,y:ac.y},{x:a.x+a.width+22,y:a.y-18},{x:ac.x,y:a.y-18},{x:ac.x,y:a.y}];
-    if (Math.abs(bc.x-ac.x) >= Math.abs(bc.y-ac.y)) {
-      const leftToRight = bc.x >= ac.x;
-      const start = {x:a.x+(leftToRight?a.width:0),y:ac.y}, end = {x:b.x+(leftToRight?0:b.width),y:bc.y};
-      const middle = (start.x+end.x)/2;
-      return [start,{x:middle,y:start.y},{x:middle,y:end.y},end];
-    }
-    const downward = bc.y >= ac.y;
-    const start = {x:ac.x,y:a.y+(downward?a.height:0)}, end = {x:bc.x,y:b.y+(downward?0:b.height)};
-    const middle = (start.y+end.y)/2;
-    return [start,{x:start.x,y:middle},{x:end.x,y:middle},end];
-  }
+  function route(edge) { return window.AtlasRouting.route(view,edge); }
   // Fixed readable sizes; abbreviated visible text is available in full in the inspector.
   function readableLines(value,width,size,maxLines,weight=400) {
     measurement.font=`${weight} ${size}px system-ui`;
@@ -158,6 +144,8 @@
       item.setAttribute('aria-pressed',String(selected.has(item.dataset.element)));
     });
     $('selection-count').textContent = selected.size ? `已选择 ${selected.size} 项` : '未选择';
+    if(!explicitScope)$('edit-scope').value=selected.size?'elements':'view';
+    updateModeHint();
   }
   function renderGraph(resetBox = false) {
     svg.replaceChildren();
@@ -192,6 +180,8 @@
       bindSelection(group,edge);svg.append(group);
     }
     for (const node of view.nodes) {
+      const clipId='node-clip-'+view.nodes.indexOf(node);
+      const clip=shape('clipPath',{id:clipId});clip.append(shape('rect',{x:node.x+4,y:node.y+4,width:Math.max(0,node.width-8),height:Math.max(0,node.height-8)}));defs.append(clip);
       const group = shape('g',{class:'graph-node'});
       group.append(shape('rect',{x:node.x,y:node.y,width:node.width,height:node.height,rx:Math.min(10,node.height/5),fill:'#fff',stroke:color(node.kind),'stroke-width':1.6}));
       group.append(shape('circle',{cx:node.x+node.width-9,cy:node.y+9,r:3,fill:statusColors[node.status]}));
@@ -200,14 +190,14 @@
       const titleHeight=showSummary?Math.min(44,node.height*.4):Math.max(1,node.height-22);
       const titleMaxLines=Math.max(1,Math.floor(titleHeight/19));
       const titleLines=readableLines(node.label,contentWidth,14,titleMaxLines,600);
-      const text=shape('text',{'font-size':14,'font-weight':600,'text-anchor':showSummary?'start':'middle'});
+      const text=shape('text',{'clip-path':`url(#${clipId})`,'font-size':14,'font-weight':600,'text-anchor':showSummary?'start':'middle'});
       const titleTop=showSummary?node.y+25:node.y+node.height/2-(titleLines.length-1)*19/2+5;
       titleLines.forEach((line,i)=>text.append(shape('tspan',{x:showSummary?node.x+14:node.x+node.width/2,y:titleTop+i*19},line)));
       if(showSummary){
         const summaryTop=titleTop+(titleLines.length-1)*19+25;
         const maxLines=Math.min(4,Math.floor((node.y+node.height-12-summaryTop)/17)+1);
         if(maxLines>0){
-          const summary=shape('text',{'font-size':11.5,'font-weight':400,style:'fill:#687e8b'});
+          const summary=shape('text',{'clip-path':`url(#${clipId})`,'font-size':11.5,'font-weight':400,style:'fill:#687e8b'});
           readableLines(node.summary,contentWidth,11.5,maxLines).forEach((line,i)=>summary.append(shape('tspan',{x:node.x+14,y:summaryTop+i*17},line)));
           group.append(summary);
         }
@@ -216,7 +206,7 @@
     }
     $('view-title').textContent = view.title; $('view-question').textContent = view.question;
     $('view-summary').textContent = view.summary;
-    $('view-notes').replaceChildren(...view.notes.map(note=>el('p','',note)));
+    $('view-notes').replaceChildren(...view.notes.map(note=>el('p','',note)),...window.AtlasRouting.getDiagnostics().map(d=>el('p','routing-warning',d.message)));
     $('empty').hidden = view.nodes.length > 0;
     $('empty').textContent = '此视图还没有节点。可在“修改图谱”模式中提出补充要求。';
     $('legend').replaceChildren();
@@ -225,7 +215,8 @@
     }
     for(const kind of new Set(elements().map(e=>e.kind))) {const chip=el('span','legend-kind',kindLabels[kind]||kind);chip.style.borderColor=color(kind);$('legend').append(chip);}
     if(changed.size) $('legend').append(el('span','legend-kind','金色虚线 · 本次修改'));
-    baseBox = {x:-24,y:-24,w:view.width+48,h:view.height+48};
+    const extent=view.edges.flatMap(route),minX=Math.min(0,...extent.map(p=>p.x)),minY=Math.min(0,...extent.map(p=>p.y));
+    baseBox = {x:minX-24,y:minY-24,w:Math.max(view.width,...extent.map(p=>p.x))-minX+48,h:Math.max(view.height,...extent.map(p=>p.y))-minY+48};
     if (resetBox || !box) box={...baseBox};
     applyBox();updateSelection();
   }
@@ -265,7 +256,9 @@
       card.append(el('p','',item.detail||'暂无详细说明。'));
       if(item.source)card.append(el('p','muted',`${item.source} → ${item.target}`));
       item.evidence.forEach(evidence=>{
-        const button=el('button','evidence-button',evidence.claim||'查看源码依据');button.append(el('span','',`${evidence.path}:${evidence.start}–${evidence.end}`));button.addEventListener('click',()=>showSource(evidence));card.append(button);
+        const button=el('button','evidence-button',evidence.claim||'查看源码依据');button.append(el('span','',`${evidence.path}:${evidence.start}–${evidence.end}`));button.disabled=Boolean(proposal);
+        if(proposal){button.title='候选源码引用须接受修改后才能读取。';button.append(el('span','', '候选源码暂不可用；接受修改后查看。'));}
+        button.addEventListener('click',()=>showSource(evidence));card.append(button);
       });
       if(!item.evidence.length)card.append(el('p','muted','暂无源码引用；请结合事实状态判断。'));
       (item.links||[]).forEach(link=>{const button=el('button','cross-link',`↗ ${link.label}`);button.addEventListener('click',()=>navigate(link.view,link.element?[link.element]:[]));card.append(button);});
@@ -273,6 +266,7 @@
     }
   }
   async function showSource(evidence) {
+    if(proposal){notify('候选源码引用暂不可用；接受修改后可查看正式图谱依据。');return;}
     const serial=++sourceRequest;
     $('source-title').textContent=`${evidence.path}:${evidence.start}–${evidence.end}`;
     $('source-claim').textContent=evidence.claim;$('source-text').textContent='正在读取已引用的源码范围…';
@@ -280,12 +274,12 @@
     try { const data=await request('/api/source?'+new URLSearchParams({path:evidence.path,start:evidence.start,end:evidence.end}));if(serial===sourceRequest)$('source-text').textContent=data.text; }
     catch(error){if(serial===sourceRequest)$('source-text').textContent=error.message;}
   }
-  function renderMessages(messages) {
+  function renderMessages(messages, forceScroll = false) {
     const log=$('messages');const nearBottom=log.scrollHeight-log.scrollTop-log.clientHeight<70;
     log.replaceChildren();
     if(!messages.length)log.append(el('p','muted','从一个节点、一条关系，或当前视图开始提问。回答会保留在这里。'));
     for(const message of messages)appendMessage(message,false);
-    if(nearBottom)log.scrollTop=log.scrollHeight;
+    if(forceScroll || nearBottom)requestAnimationFrame(()=>{log.scrollTop=log.scrollHeight;});
   }
   function appendMessage(message, scroll=true) {
     const entry=el('article','message '+(message.role==='user'?'user':message.role==='error'?'error':''));
@@ -313,15 +307,15 @@
     for(const v of next.views){const old=previous.views.find(x=>x.id===v.id);const before=new Map(old?[...old.nodes,...old.edges].map(x=>[x.id,JSON.stringify(x)]):[]);for(const item of [...v.nodes,...v.edges])if(before.get(item.id)!==JSON.stringify(item))result.add(`${v.id}:${item.id}`);}
     return result;
   }
-  async function loadState({baseline=null, focus=false}={}) {
+  async function loadState({baseline=null, focus=false, scrollMessages=false}={}) {
     const state=await request('/api/state');
     if(!state.atlas || !state.atlas.views?.length)throw new Error('服务没有返回可用图谱。');
-    const prior=atlas;atlas=state.atlas;
+    const prior=atlas;atlas=state.atlas;freshness=state.freshness||{};coverage=state.coverage||'仅核对已引用的源码；不代表完整仓库覆盖。';
     if(baseline)changed=compare(baseline,atlas);else if(prior && prior.revision!==atlas.revision)changed=compare(prior,atlas);
     $('atlas-title').textContent=atlas.title;$('atlas-summary').textContent=atlas.summary;document.title=atlas.title+' · 代码图谱';
     $('revision').textContent=`修订 r${atlas.revision}`;$('backend').textContent=`本地 · ${state.backend||'Codex'}`;
     $('export-json').disabled=false;$('export-svg').disabled=false;
-    renderMessages(state.messages||[]);
+    renderMessages(state.messages||[],scrollMessages||!prior);
     const hash=hashState();navigate(hash.view||view?.id||atlas.views[0].id,hash.elements,false,focus||!prior);
     writeHash(true);
     const job=typeof state.busy==='string'?state.busy:state.busy?.job;
@@ -340,8 +334,11 @@
           if(error.status===404){saveJob(null);await loadState();throw error;}
           failures++;notify(`任务连接暂时中断，将自动重试：${error.message}`,true);await pause(Math.min(10000,1500*failures));continue;
         }
+        if(result.status==='preview'){
+          await loadState();showPreview(result);notify('候选图谱已生成；接受后才会更新正式修订。');break;
+        }
         if(result.status==='done'){
-          await loadState({baseline:snapshot?.mode==='edit'?snapshot.baseline:null});
+          await loadState({baseline:snapshot?.mode==='edit'?snapshot.baseline:null,scrollMessages:true});
           // The canonical log is authoritative; append a fallback only if needed.
           if(result.answer && ![...$('messages').querySelectorAll('.message > div:not(.message-meta)')].some(n=>n.textContent===result.answer))appendMessage({role:'assistant',content:result.answer,...snapshot,revision:result.revision});
           notify(snapshot?.mode==='edit'?'图谱已更新；金色虚线标出新增或变化的元素。':'回答已完成。');saveJob(null);break;
@@ -363,6 +360,20 @@
     event.preventDefault();if(busy||!atlas)return;
     const question=$('question').value.trim();if(!question)return;
     const snapshot={mode:document.querySelector('input[name=mode]:checked').value,view:view.id,elements:[...selected],question,revision:atlas.revision};
+    if(snapshot.mode==='edit'){
+      snapshot.scope=$('edit-scope').value;snapshot.preview=$('edit-preview').checked;
+      if(snapshot.scope==='elements'&&!snapshot.elements.length){notify('请先选择要修改的元素，或切换到整个当前视图。');return;}
+      snapshot.allow_new_views=snapshot.scope==='view';snapshot.permitted_neighbors=[];
+      if(snapshot.scope==='elements'&&$('edit-neighbors').checked){
+        const seeds=new Set(snapshot.elements),neighbors=new Set();
+        for(const e of view.edges){
+          if(seeds.has(e.id)){if(!seeds.has(e.source))neighbors.add(e.source);if(!seeds.has(e.target))neighbors.add(e.target);}
+          if(seeds.has(e.source)&&!seeds.has(e.target))neighbors.add(e.target);
+          if(seeds.has(e.target)&&!seeds.has(e.source))neighbors.add(e.source);
+        }
+        snapshot.permitted_neighbors=[...neighbors];
+      }
+    }
     const baseline=snapshot.mode==='edit'?structuredClone(atlas):null;
     localBusy=true;setBusy(true,'正在提交…');notify('');
     try{
@@ -373,15 +384,61 @@
       await pollJob(job,frozen);
     }catch(error){notify(error.message,true);appendMessage({role:'error',content:error.message,...snapshot});localBusy=false;setBusy(false);if(error.status===409){const {state,job}=await loadState().catch(()=>({state:{}}));if(job)pollJob(job);else if(state.busy)watchBusy();}}
   });
-  $('modes').addEventListener('change',()=>{$('mode-hint').textContent=document.querySelector('input[name=mode]:checked').value==='edit'?'修改当前视图；提交时冻结选择与修订版本。':'只解释，不改变图谱。';});
+  $('modes').addEventListener('change',updateModeHint);
+  $('edit-scope').addEventListener('change',()=>{explicitScope=true;updateModeHint();});
   $('undo').addEventListener('click',async()=>{
     if(busy||!atlas)return;localBusy=true;setBusy(true,'正在撤销…');
     try{await request('/api/undo',{revision:atlas.revision});await loadState();notify('已恢复上一版图谱，并生成新的修订。');}catch(error){notify(error.message,true);if(error.status===409)await loadState().catch(()=>{});}finally{localBusy=false;setBusy(serverBusy);if(serverBusy)watchBusy();}
   });
+  function updateModeHint() {
+    const edit=document.querySelector('input[name=mode]:checked').value==='edit';
+    $('edit-options').hidden=!edit;
+    $('mode-hint').textContent=edit?($('edit-scope').value==='elements'?`仅修改选中 ${selected.size} 项；邻居仅可调整几何。`:`修改整个当前视图「${view?.title||''}」；其他已有视图保持不变。`):'只解释，不改变图谱。';
+  }
+  function affectedViews(){return Object.entries(freshness).filter(([,v])=>['stale','unknown','unavailable'].includes(v.status)).map(([id])=>id);}
+  function refreshViews(){const affected=affectedViews();return $('refresh-scope').value==='all'?affected:affected.filter(id=>id===view?.id);}
+  $('refresh-scope').addEventListener('change',renderFreshness);
+  function renderFreshness(){
+    const entry=freshness[view?.id],labels={fresh:'当前',stale:'源码已变化',unknown:'未知',unavailable:'源码不可用'};
+    $('source-status').textContent=`当前视图：${labels[entry?.status]||'未知'}${entry?.checked_at?' · '+new Date(entry.checked_at).toLocaleString():''}`;
+    const paths=[...(entry?.changed_paths||[]),...(entry?.unavailable_paths||[])];
+    if(paths.length)$('source-status').textContent+=' · '+paths.join('、');
+    $('source-coverage').textContent='仅核对已有源码引用；不代表完整仓库覆盖。';
+    $('source-coverage').title=coverage;
+    $('source-refresh').textContent=`刷新${$('refresh-scope').value==='all'?'全部受影响视图':'当前受影响视图'}（${refreshViews().length}）`;
+    $('source-refresh').disabled=busy||Boolean(proposal)||!refreshViews().length;
+  }
+  function showPreview(data){
+    proposal=data;$('preview-panel').hidden=false;$('preview-answer').textContent=data.answer||'';
+    $('preview-diff').replaceChildren(...(data.diff||[]).map(d=>el('li','',`${d.view} · ${d.kind} ${d.id} · ${{added:'新增',removed:'移除',changed:'修改'}[d.change]||d.change}${d.fields?.length?'：'+d.fields.join('、'):''}`)));
+    $('preview-warnings').replaceChildren(...(data.warnings||[]).map(w=>el('li','',w)));
+    const h=hashState();navigate(h.view||view?.id,h.elements,false,false);setBusy(false);
+  }
+  function closePreview(){proposal=null;$('preview-panel').hidden=true;saveJob(null);const h=hashState();navigate(h.view,h.elements,false,false);writeHash(true);}
+  $('preview-accept').addEventListener('click',async()=>{
+    if(!proposal||busy)return;const pending=proposal,baseline=structuredClone(atlas);localBusy=true;setBusy(true,'正在应用候选修改…');
+    try{await request('/api/apply',{proposal:pending.proposal,revision:pending.base_revision});closePreview();await loadState({baseline,scrollMessages:true});notify('候选修改已应用。');}
+    catch(error){notify(error.message,true);if(error.status===409)await loadState().catch(()=>{});}
+    finally{localBusy=false;setBusy(serverBusy);}
+  });
+  $('preview-discard').addEventListener('click',async()=>{
+    if(!proposal||busy)return;localBusy=true;setBusy(true);
+    try{await request('/api/discard',{proposal:proposal.proposal});closePreview();await loadState();notify('已丢弃候选修改。');}catch(error){notify(error.message,true);}finally{localBusy=false;setBusy(serverBusy);}
+  });
+  $('source-check').addEventListener('click',async()=>{
+    if(busy||!atlas)return;localBusy=true;setBusy(true,'正在核对已引用源码…');
+    try{const result=await request('/api/source-check',{revision:atlas.revision});freshness=result.freshness||{};coverage=result.coverage||coverage;renderFreshness();notify('已检查引用源码的状态。');}
+    catch(error){notify(error.message,true);}finally{localBusy=false;setBusy(serverBusy);}
+  });
+  $('source-refresh').addEventListener('click',async()=>{
+    if(busy||proposal||!refreshViews().length)return;const baseline=structuredClone(atlas);localBusy=true;setBusy(true,'正在提交源码刷新…');
+    try{const {job}=await request('/api/refresh',{revision:atlas.revision,views:refreshViews(),preview:$('refresh-preview').checked});if(!job)throw new Error('服务未返回任务编号。');const snapshot={mode:'edit',baseline};saveJob({job,snapshot});await pollJob(job,snapshot);}
+    catch(error){notify(error.message,true);}finally{localBusy=false;setBusy(serverBusy);}
+  });
   function download(blob,filename){const url=URL.createObjectURL(blob),link=el('a');link.href=url;link.download=filename;document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);}
   $('export-json').addEventListener('click',async()=>{try{const data=await request('/api/export');download(new Blob([JSON.stringify(data,null,2)+'\n'],{type:'application/json'}),'atlas.json');}catch(error){notify(error.message,true);}});
   $('export-svg').addEventListener('click',()=>{
-    if(!view)return;const clone=svg.cloneNode(true);clone.setAttribute('xmlns',NS);clone.setAttribute('width',view.width+48);clone.setAttribute('height',view.height+48);clone.setAttribute('viewBox',`${baseBox.x} ${baseBox.y} ${baseBox.w} ${baseBox.h}`);
+    if(!view||proposal)return;const clone=svg.cloneNode(true);clone.setAttribute('xmlns',NS);clone.setAttribute('width',baseBox.w);clone.setAttribute('height',baseBox.h);clone.setAttribute('viewBox',`${baseBox.x} ${baseBox.y} ${baseBox.w} ${baseBox.h}`);
     clone.removeAttribute('id');clone.removeAttribute('class');
     const style=shape('style',{},'.edge-visible{fill:none;stroke-width:1.8}.edge-hit{display:none}.graph-edge text{font:11px system-ui;paint-order:stroke;stroke:#fff;stroke-width:5px}.graph-node text{font-family:system-ui,sans-serif;fill:#263d4d}.group-label{font:12px system-ui;fill:#8094a2}.selected rect,.selected .edge-visible{stroke:#087582;stroke-width:3}.changed rect,.changed .edge-visible{stroke:#bd7a19;stroke-width:3;stroke-dasharray:6 3}');clone.prepend(style);
     clone.querySelectorAll('[tabindex]').forEach(n=>n.removeAttribute('tabindex'));

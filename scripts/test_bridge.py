@@ -114,21 +114,22 @@ class BridgeTests(unittest.TestCase):
         view['nodes'][0]['summary'] = 'Produces the source value.'
         return view
 
-    def test_inspector_only_and_overlap_edits_are_rejected_atomically(self):
+    def test_selected_inspector_edit_commits(self):
         view = copy.deepcopy(fixture()['views'][0])
         view['nodes'][0]['detail'] = 'A richer inspector explanation.'
         view['nodes'][0]['evidence'][0]['claim'] = 'A clarified evidence claim.'
         view['nodes'][0]['links'] = [{'view': 'overview', 'element': 'consumer', 'label': 'Consumer'}]
         self.bridge.response['replacement_view'] = view
         result = self.done(self.ask('edit'))
-        self.assertEqual(result['status'], 'error')
-        self.assertIn('inspector-only', result['error'])
-        self.assertEqual(self.bridge.atlas, fixture())
-        self.assertFalse(self.bridge.state_path.exists())
+        self.assertEqual(result['status'], 'done', result)
+        self.assertEqual(self.bridge.atlas['views'][0], view)
+        self.assertEqual(self.bridge.atlas['revision'], 1)
+
+    def test_overlap_edit_is_rejected_atomically(self):
         view = self.edited_view()
         view['nodes'][1]['x'] = 50
         self.bridge.response['replacement_view'] = view
-        result = self.done(self.ask('edit'))
+        result = self.done(self.ask('edit', scope='view'))
         self.assertEqual(result['status'], 'error')
         self.assertIn('overlap', result['error'])
         self.assertIn('source and consumer', result['error'])
@@ -175,7 +176,7 @@ class BridgeTests(unittest.TestCase):
         self.bridge.response = {'answer': 'Changed the selected layout.',
                                 'replacement_view': overlapping, 'new_views': []}
         self.server.bridge = self.bridge
-        result = self.done(self.ask('edit'))
+        result = self.done(self.ask('edit', scope='view'))
         self.assertEqual(result['status'], 'error', result)
         self.assertIn('overview', result['error'])
         self.assertIn('source and consumer', result['error'])
@@ -213,7 +214,7 @@ class BridgeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             excerpt(self.repo, {'path': 'linked/atlas.json', 'start': 1, 'end': 1})
 
-    def test_restart_ignores_obsolete_history_sources_but_undo_rechecks_them(self):
+    def test_restart_and_undo_keep_obsolete_sources_visible_as_unavailable(self):
         (self.repo / 'current.py').write_text('def source():\n    return 8\n', encoding='utf-8')
         view = self.edited_view()
         view['nodes'][0]['evidence'][0]['path'] = 'current.py'
@@ -225,16 +226,14 @@ class BridgeTests(unittest.TestCase):
         try:
             self.assertEqual(restored.atlas['revision'], 1)
             self.assertEqual(restored.history[0]['views'][0]['nodes'][0]['evidence'][0]['path'], 'example.py')
-            persisted = restored.state_path.read_bytes()
-            before = restored.state()
-            with self.assertRaisesRegex(ValueError, 'evidence is unavailable'):
-                restored.undo({'revision': 1})
-            self.assertEqual(restored.state(), before)
-            self.assertEqual(restored.state_path.read_bytes(), persisted)
+            persisted_state = json.loads(restored.state_path.read_text())
+            restored.undo({'revision': 1})
+            self.assertEqual(restored.atlas['revision'], 2)
+            self.assertEqual(restored.state()['freshness']['overview']['status'], 'unavailable')
         finally:
             restored.close()
         # Historical structure must still be valid, even when its sources are obsolete.
-        state = json.loads(self.bridge.state_path.read_text())
+        state = persisted_state
         state['history'][0]['views'][0]['edges'][0]['target'] = 'missing'
         self.bridge.state_path.write_text(json.dumps(state))
         with self.assertRaisesRegex(ValueError, 'source/target'):
@@ -272,7 +271,7 @@ class BridgeTests(unittest.TestCase):
         added = copy.deepcopy(fixture()['views'][0])
         added['id'] = 'details'
         self.bridge.response['new_views'] = [added]
-        result = self.done(self.ask('edit'))
+        result = self.done(self.ask('edit', scope='view'))
         self.assertEqual(result['status'], 'done', result)
         self.assertEqual(result['revision'], 1)
         self.assertEqual(len(self.bridge.atlas['views']), 2)
@@ -368,6 +367,7 @@ class BridgeTests(unittest.TestCase):
         (self.repo / 'example.py').unlink()
         (self.repo / 'example.py').symlink_to(self.seed)
         self.assertEqual(self.request('GET', path)[0], 400)
+        self.assertEqual(self.request('GET', '/routing.js')[0], 200)
         for path in ('/atlas.json', '/../atlas.json', '/assets/atlas.schema.json', '/api/source?path=example.py&start=1&end=1&end=2'):
             self.assertIn(self.request('GET', path)[0], (400, 404))
 
