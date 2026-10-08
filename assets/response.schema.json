@@ -374,7 +374,11 @@
                   "type": "string"
                 },
                 "kind": {
-                  "type": "string"
+                  "type": "string",
+                  "enum": [
+                    "data-structure",
+                    "functional-block"
+                  ]
                 },
                 "status": {
                   "type": "string",

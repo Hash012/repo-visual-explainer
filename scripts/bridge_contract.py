@@ -3,7 +3,7 @@ import hashlib
 import json
 from datetime import datetime, timezone
 
-from validate_atlas import excerpt, source_lines
+from validate_atlas import NODE_KINDS, excerpt, source_lines
 
 COVERAGE = ('Freshness covers only files explicitly cited by each view, using full-file SHA-256; '
             'it does not scan the repository or track uncited dependencies, Git state, or all AI reads. '
@@ -131,3 +131,13 @@ def validate_citations(repo, before, after, full_views=()):
                 for evidence in item['evidence']:
                     if view['id'] in full_views or previous is None or evidence not in previous['evidence']:
                         excerpt(repo, evidence)
+
+
+def validate_node_semantics(before, after, full_views=()):
+    """Legacy nodes survive only unchanged, keyed by view and node ID."""
+    old = {v['id']: {n['id']: n for n in v['nodes']} for v in before['views']}
+    for view in after['views']:
+        previous = old.get(view['id'], {})
+        for node in view['nodes']:
+            if node['kind'] not in NODE_KINDS and (view['id'] in full_views or previous.get(node['id']) != node):
+                raise ValueError(f'view {view["id"]}, node {node["id"]}: new, changed or refreshed nodes must use kind data-structure or functional-block')

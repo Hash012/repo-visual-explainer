@@ -13,6 +13,7 @@ MAX_JSON = 8 * 1024 * 1024
 MAX_SOURCE = 2 * 1024 * 1024
 MAX_LINES = 200
 MAX_EXCERPT = 64 * 1024
+NODE_KINDS = ('data-structure', 'functional-block')
 ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$')
 
 
@@ -130,8 +131,12 @@ def overlapping_nodes(view):
                 yield a['id'], b['id']
 
 
-def validate_atlas(atlas, repo=None):
-    errors = schema_errors(atlas, load_json(ASSETS / 'atlas.schema.json'))
+def validate_atlas(atlas, repo=None, allow_legacy_nodes=False):
+    schema = load_json(ASSETS / 'atlas.schema.json')
+    if allow_legacy_nodes:
+        # Runtime may retain historical graphs; new authoring remains strict by default.
+        schema['properties']['views']['items']['properties']['nodes']['items']['properties']['kind'].pop('enum')
+    errors = schema_errors(atlas, schema)
     warnings = []
     if errors:
         return errors, warnings
@@ -157,6 +162,8 @@ def validate_atlas(atlas, repo=None):
                 seen.add(item['id'])
                 if section == 'nodes':
                     node_ids.add(item['id'])
+                    if item['kind'] not in NODE_KINDS:
+                        warnings.append(f'{item_at}: legacy node kind {item["kind"]!r}; classify as data-structure or functional-block when editing or refreshing')
                 if section != 'edges':
                     if item['x'] < 0 or item['y'] < 0 or item['x'] + item['width'] > view['width'] or item['y'] + item['height'] > view['height']:
                         errors.append(f'{item_at}: shape lies outside canvas')

@@ -4,7 +4,8 @@
   const NS = 'http://www.w3.org/2000/svg';
   const statusLabels = {verified:'已核对', inferred:'推断', planned:'规划', blocked:'阻塞'};
   const statusColors = {verified:'#258676', inferred:'#537db6', planned:'#b48632', blocked:'#ba6155'};
-  const kindLabels = {'public-interface':'公开接口','mutable-state':'可变状态',artifact:'产物',execution:'执行',ownership:'归属',data:'数据',call:'调用',invalidation:'失效'};
+  const nodeKinds = Object.assign(Object.create(null),{'data-structure':'数据结构','functional-block':'功能块'});
+  const kindLabels = Object.assign(Object.create(null),{...nodeKinds,'public-interface':'公开接口','mutable-state':'可变状态',artifact:'产物',execution:'执行',ownership:'归属',data:'数据',call:'调用',invalidation:'失效'});
   const palette = ['#6397a9','#8d85b7','#75a293','#ba9970','#7993bd','#b9859d'];
   let atlas = null, view = null, selected = new Set(), box = null, baseBox = null;
   let busy = false, serverBusy = false, localBusy = false, polling = false, changed = new Set(), dragging = null, activeJob = null;
@@ -182,16 +183,21 @@
     for (const node of view.nodes) {
       const clipId='node-clip-'+view.nodes.indexOf(node);
       const clip=shape('clipPath',{id:clipId});clip.append(shape('rect',{x:node.x+4,y:node.y+4,width:Math.max(0,node.width-8),height:Math.max(0,node.height-8)}));defs.append(clip);
-      const group = shape('g',{class:'graph-node'});
-      group.append(shape('rect',{x:node.x,y:node.y,width:node.width,height:node.height,rx:Math.min(10,node.height/5),fill:'#fff',stroke:color(node.kind),'stroke-width':1.6}));
+      const group = shape('g',{class:'graph-node','data-node-kind':node.kind});
+      const typed=Object.hasOwn(nodeKinds,node.kind);
+      const typeLabel=nodeKinds[node.kind]||'未分类 · 旧版节点';
+      const tint=node.kind==='data-structure'?'#f7f3fc':node.kind==='functional-block'?'#f1f9f8':'#fff8ed';
+      group.append(shape('rect',{x:node.x,y:node.y,width:node.width,height:node.height,rx:Math.min(10,node.height/5),fill:tint,stroke:color(node.kind),'stroke-width':1.6}));
       group.append(shape('circle',{cx:node.x+node.width-9,cy:node.y+9,r:3,fill:statusColors[node.status]}));
       const contentWidth=Math.max(1,node.width-28);
+      const hasBadge=node.height>=72 && node.width>=110;
+      if(hasBadge)group.append(shape('text',{x:node.x+14,y:node.y+17,'font-size':10,'font-weight':500,'clip-path':`url(#${clipId})`,style:`fill:${typed?'#617b87':'#9b682a'}`},typeLabel));
       const showSummary=Boolean(node.summary) && node.width>=130 && node.height>=88;
-      const titleHeight=showSummary?Math.min(44,node.height*.4):Math.max(1,node.height-22);
+      const titleHeight=showSummary?Math.min(44,node.height*.4- (hasBadge?8:0)):Math.max(1,node.height-22-(hasBadge?18:0));
       const titleMaxLines=Math.max(1,Math.floor(titleHeight/19));
       const titleLines=readableLines(node.label,contentWidth,14,titleMaxLines,600);
       const text=shape('text',{'clip-path':`url(#${clipId})`,'font-size':14,'font-weight':600,'text-anchor':showSummary?'start':'middle'});
-      const titleTop=showSummary?node.y+25:node.y+node.height/2-(titleLines.length-1)*19/2+5;
+      const titleTop=showSummary?node.y+(hasBadge?39:25):node.y+node.height/2-(titleLines.length-1)*19/2+(hasBadge?13:5);
       titleLines.forEach((line,i)=>text.append(shape('tspan',{x:showSummary?node.x+14:node.x+node.width/2,y:titleTop+i*19},line)));
       if(showSummary){
         const summaryTop=titleTop+(titleLines.length-1)*19+25;
@@ -207,6 +213,7 @@
     $('view-title').textContent = view.title; $('view-question').textContent = view.question;
     $('view-summary').textContent = view.summary;
     $('view-notes').replaceChildren(...view.notes.map(note=>el('p','',note)),...window.AtlasRouting.getDiagnostics().map(d=>el('p','routing-warning',d.message)));
+    if(view.nodes.some(n=>!Object.hasOwn(nodeKinds,n.kind)))$('view-notes').append(el('p','routing-warning','此视图含未分类的旧版节点；选择整个视图修改，将节点重新对应到数据结构或功能块。'));
     $('empty').hidden = view.nodes.length > 0;
     $('empty').textContent = '此视图还没有节点。可在“修改图谱”模式中提出补充要求。';
     $('legend').replaceChildren();
@@ -251,7 +258,7 @@
     if(!selected.size){content.append(el('p','muted','点击节点或连线，阅读说明与源码依据。'));return;}
     for(const item of elements().filter(e=>selected.has(e.id))) {
       const card=el('article','detail-card');card.append(el('h3','',item.label||item.id));
-      const meta=el('div','detail-meta');meta.append(el('span','',kindLabels[item.kind]||item.kind),el('span','',statusLabels[item.status]),el('span','',item.id));card.append(meta);
+      const meta=el('div','detail-meta');meta.append(el('span','',(item.source?kindLabels[item.kind]||item.kind:nodeKinds[item.kind]||'未分类 · 旧版节点')),el('span','',statusLabels[item.status]),el('span','',item.id));card.append(meta);
       if(item.summary)card.append(el('p','',item.summary));
       card.append(el('p','',item.detail||'暂无详细说明。'));
       if(item.source)card.append(el('p','muted',`${item.source} → ${item.target}`));

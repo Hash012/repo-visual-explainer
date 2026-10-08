@@ -1,29 +1,46 @@
 # Repository Visual Explainer
 
-一个用于理解代码仓库的 Codex skill：生成有源码证据的多视图关系图，在浏览器中选中节点或连线，向 AI 提问，或让 AI 更新图和说明。
+一个用于理解代码仓库的 Codex skill：生成以数据结构和功能块为节点、有源码证据的多视图关系图，在浏览器中选中节点或连线，向 AI 提问，或让 AI 更新图和说明。
 
 开发与发布仓库：[Hash012/repo-visual-explainer](https://github.com/Hash012/repo-visual-explainer)。Skill 入口是 [SKILL.md](SKILL.md)。
 
-## 两个版本下载
+## 三个版本下载
 
 | 版本 | 固定下载入口 | 用途 |
 | --- | --- | --- |
 | 改进前 · v0.1.0 | [下载 ZIP](https://github.com/Hash012/repo-visual-explainer/releases/download/v0.1.0/repo-visual-explainer-v0.1.0.zip) | 保留原有行为和 UI，独立安装或对照 |
-| 改进后 · v0.2.0 | [下载 ZIP](https://github.com/Hash012/repo-visual-explainer/releases/download/v0.2.0/repo-visual-explainer-v0.2.0.zip) | 修改范围约束、可选预览、来源变化检测与避障连线 |
+| 第一次改进 · v0.2.0 | [下载 ZIP](https://github.com/Hash012/repo-visual-explainer/releases/download/v0.2.0/repo-visual-explainer-v0.2.0.zip) | 修改范围约束、可选预览、来源变化检测与避障连线 |
+| 节点语义更新 · v0.3.0 | [下载 ZIP](https://github.com/Hash012/repo-visual-explainer/releases/download/v0.3.0/repo-visual-explainer-v0.3.0.zip) | 每个方块对应数据结构或功能块，明确显示分类并约束 AI 修改 |
 
-两个包都只包含通用 skill。发行标签固定，下载包不会随 `main` 更新。解压后的 `repo-visual-explainer/` 即 skill 目录；只安装其中一个版本，避免重复发现。
+三个包都只包含通用 skill。发行标签固定，下载包不会随 `main` 更新。解压后的 `repo-visual-explainer/` 即 skill 目录；只安装其中一个版本，避免重复发现。
+
+下载命令（各包独立保存，不会覆盖彼此）：
+
+```bash
+curl -fL --retry 3 -o repo-visual-explainer-v0.1.0.zip https://github.com/Hash012/repo-visual-explainer/releases/download/v0.1.0/repo-visual-explainer-v0.1.0.zip
+curl -fL --retry 3 -o repo-visual-explainer-v0.2.0.zip https://github.com/Hash012/repo-visual-explainer/releases/download/v0.2.0/repo-visual-explainer-v0.2.0.zip
+curl -fL --retry 3 -o repo-visual-explainer-v0.3.0.zip https://github.com/Hash012/repo-visual-explainer/releases/download/v0.3.0/repo-visual-explainer-v0.3.0.zip
+```
+
+例如 `unzip repo-visual-explainer-v0.3.0.zip -d skill-v0.3.0`，将其中 `repo-visual-explainer/` 安装到个人 skills 目录；已有安装时先保留自己的改动。需要对照其他版本时分别解压到不同目录。
 
 新版 sidecar 保存来源基线；降级使用新版迁移时保存的 v1 备份，并保留新版状态的副本。不要直接让旧服务读取新版 sidecar。具体步骤见 [运行说明](references/runtime.md)。
 
+## 节点理念
+
+每个方块对应一个**数据结构**或**功能块**，并在卡片与详情中明确标注。数据结构解释字段、对象身份、所有权和生命周期；功能块解释职责、输入输出与实际函数边界。步骤、条件、状态、问题和一般说明通过关系、分组与文字表达。
+
+新生成图和 AI 新增/修改节点接受类型校验。分类不能证明语义正确，仍须回到代码核对。旧版图仍可浏览并显示未分类提示；不会根据旧标签自动猜测类型，可选择整个视图重新整理。
+
 ## 界面预览
 
-以下截图来自新版 skill 对本公开仓库 `Hash012/repo-visual-explainer` 自身的真实源码分析：运行架构、修改事务和来源刷新共三个视图，节点与关系附相对路径及行号。问答、局部修改和预览使用真实 Codex CLI 响应，不使用预设回答。
+以下截图来自新版 skill 对本公开仓库 `Hash012/repo-visual-explainer` 自身的真实源码分析：运行架构、核心数据结构和修改功能共三个视图，节点与关系附相对路径及行号。问答、局部修改和预览使用真实 Codex CLI 响应，不使用预设回答。
 
-截图基于 v0.2.0 发布前的开发工作树；不展示任何其他项目的代码或私有资料。图谱初始来源状态为「未知」，直到显式刷新建立核对基线，不能把截图中的核对说明视为全仓库运行验证。
+截图基于 v0.3.0 发布前的开发工作树；不展示任何其他项目的代码或私有资料。图谱初始来源状态为「未知」，直到显式刷新建立核对基线，不能把截图中的核对说明视为全仓库运行验证。
 
 ### 仓库运行架构
 
-总览把浏览器、Python 桥接、独立 Codex CLI、来源读取、候选校验和原子状态串联起来；细节视图展开预览事务及来源刷新。
+总览将浏览器交互、AI 桥接、范围校验等功能块与 Atlas、Proposal 等数据结构连接起来；详细视图展开字段组织与修改功能。
 
 ![本公开仓库的真实运行架构：选中本地 Python 桥接节点，查看职责与源码证据](docs/images/ui-overview.png)
 
@@ -31,22 +48,23 @@
 
 左侧切换视图，中间选择节点或连线，右侧查看职责、源码引用和对话。问答模式解释所选部分，保持图数据不变。
 
-![真实问答：选中本仓库的预览候选节点，说明与真实 AI 回答同步显示](docs/images/ui-qa.png)
+![真实问答：选中本仓库的 Proposal 数据结构节点，说明与真实 AI 回答同步显示](docs/images/ui-qa.png)
 
 ### 修改可视化
 
 选择修改范围后，针对问题更新图与说明。局部修改只允许所选元素及明确授权的邻居移动；拆解步骤或新增视图需选择整个视图范围。默认自动应用，也可先预览差异再应用；可撤销修改。
 
-![真实修改预览：仅选中节点的 label、summary、detail 发生变化，权威图尚未更新](docs/images/ui-preview.png)
+![真实修改预览：仅所选 Proposal 数据结构的文字发生变化，权威图尚未更新](docs/images/ui-preview.png)
 
 应用后，候选成为当前图谱；对话与修订同步保存。
 
-![真实修改已应用：预览候选节点获得更明确的文字，并同步保存 AI 回答](docs/images/ui-edit.png)
+![真实修改已应用：Proposal 数据结构获得更明确的字段与生命周期说明，并同步保存 AI 回答](docs/images/ui-edit.png)
 
 ## 功能
 
 | 能力 | 行为 |
 | --- | --- |
+| 节点语义 | 方块只有数据结构/功能块两类，显示分类；新改节点强制校验类型 |
 | 多视图关系图 | 从端到端总览展开调用、数据、状态、生命周期与失败路径，按仓库实际复杂度选取视图 |
 | 源码证据 | 节点和重要关系引用仓库相对路径与行段，区分已核对、推断、规划和阻塞 |
 | 元素选择 | 节点与连线可点击、键盘选择和多选；跨视图链接定位具体元素 |

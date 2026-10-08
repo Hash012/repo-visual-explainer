@@ -48,6 +48,101 @@ class UpgradeTests(unittest.TestCase):
         self.assertEqual(result['status'], 'preview', result)
         return result
 
+    def test_legacy_nodes_load_migrate_restart_and_undo_with_warnings(self):
+        atlas = fixture()
+        atlas['views'][0]['nodes'][0]['kind'] = 'phase'
+        self.replace_seed(atlas)
+        self.assertTrue(any('legacy node kind' in w for w in self.bridge.state()['warnings']))
+        view = copy.deepcopy(atlas['views'][0])
+        view['nodes'][0]['kind'] = 'functional-block'
+        self.bridge.response['replacement_view'] = view
+        result = self.done(self.ask('edit', elements=['source']))
+        self.assertEqual(result['status'], 'done', result)
+        self.bridge.close()
+        restored = Bridge(self.repo, self.seed)
+        try:
+            self.assertEqual(restored.state()['warnings'], [])
+            restored.undo({'revision': 1})
+            self.assertEqual(restored.atlas['views'][0]['nodes'][0]['kind'], 'phase')
+            self.assertTrue(any('legacy node kind' in w for w in restored.state()['warnings']))
+        finally:
+            restored.close()
+
+    def test_unchanged_legacy_nodes_and_unrelated_views_survive_scoped_edits(self):
+        atlas = fixture()
+        atlas['views'][0]['nodes'][1]['kind'] = 'concept'
+        unrelated = copy.deepcopy(atlas['views'][0])
+        unrelated['id'] = 'unrelated'
+        unrelated['nodes'][0]['kind'] = 'phase'
+        atlas['views'].append(unrelated)
+        self.replace_seed(atlas)
+        view = copy.deepcopy(atlas['views'][0])
+        view['nodes'][0]['detail'] = 'source() returns the output value.'
+        view['nodes'].reverse()
+        self.bridge.response['replacement_view'] = view
+        result = self.done(self.ask('edit', elements=['source']))
+        self.assertEqual(result['status'], 'done', result)
+        self.assertEqual(self.bridge.atlas['views'][1], unrelated)
+        self.assertTrue(any('legacy node kind' in w for w in result['warnings']))
+
+    def test_changed_or_added_legacy_nodes_reject_atomically(self):
+        atlas = fixture()
+        atlas['views'][0]['nodes'][0]['kind'] = 'phase'
+        self.replace_seed(atlas)
+        before = self.authority()
+        for field, value in [('detail', 'Updated phase'), ('x', 40), ('kind', 'other-stage')]:
+            with self.subTest(field=field):
+                view = copy.deepcopy(atlas['views'][0])
+                view['nodes'][0][field] = value
+                self.bridge.response['replacement_view'] = view
+                result = self.done(self.ask('edit', elements=['source']))
+                self.assertEqual(result['status'], 'error', result)
+                self.assertIn('must use kind', result['error'])
+                self.assertEqual(self.authority(), before)
+        view = copy.deepcopy(atlas['views'][0])
+        extra = copy.deepcopy(view['nodes'][0])
+        extra.update(id='extra', x=550)
+        view['nodes'].append(extra)
+        self.bridge.response['replacement_view'] = view
+        result = self.done(self.ask('edit', scope='view'))
+        self.assertEqual(result['status'], 'error', result)
+        self.assertEqual(self.authority(), before)
+
+    def test_typed_node_cannot_regress_and_new_views_require_semantic_kinds(self):
+        before = self.authority()
+        view = copy.deepcopy(fixture()['views'][0])
+        view['nodes'][0]['kind'] = 'workflow-stage'
+        self.bridge.response['replacement_view'] = view
+        result = self.done(self.ask('edit', elements=['source']))
+        self.assertEqual(result['status'], 'error', result)
+        self.assertEqual(self.authority(), before)
+        view['id'] = 'new_view'
+        self.bridge.response = {'answer': 'Added view.', 'replacement_view': None, 'new_views': [view]}
+        result = self.done(self.ask('edit', scope='view'))
+        self.assertEqual(result['status'], 'error', result)
+        self.assertIn('AI response invalid', result['error'])
+        self.assertEqual(self.authority(), before)
+
+    def test_refresh_requires_all_authorized_nodes_typed_only(self):
+        atlas = fixture()
+        atlas['views'][0]['nodes'][1]['kind'] = 'concept'
+        other = copy.deepcopy(atlas['views'][0])
+        other['id'] = 'unrelated'
+        atlas['views'].append(other)
+        self.replace_seed(atlas)
+        self.bridge.response['replacement_view'] = copy.deepcopy(atlas['views'][0])
+        before = self.authority()
+        result = self.refresh(['overview'])
+        self.assertEqual(result['status'], 'error', result)
+        self.assertEqual(self.authority(), before)
+        view = copy.deepcopy(atlas['views'][0])
+        view['nodes'][1]['kind'] = 'data-structure'
+        self.bridge.response['replacement_view'] = view
+        result = self.refresh(['overview'])
+        self.assertEqual(result['status'], 'done', result)
+        self.assertEqual(self.bridge.atlas['views'][0]['nodes'][1]['kind'], 'data-structure')
+        self.assertEqual(self.bridge.atlas['views'][1], other)
+
     def test_legacy_ask_still_commits_and_persists_v2(self):
         self.bridge.response['replacement_view'] = self.edited_view()
         result = self.done(self.ask('edit'))
